@@ -7,9 +7,107 @@ from .ap_components import (
     att_Drude1D,
     PowerDrude1D,
     PowerGaussian1D)
-from astropy.modeling.fitting import LevMarLSQFitter
-from scipy.optimize import least_squares
 import numpy as np
+import warnings
+from astropy.modeling.fitting import (
+    LevMarLSQFitter,
+    TRFLSQFitter,
+    fitter_to_model_params,
+    model_to_fit_params)
+from astropy.utils.exceptions import AstropyUserWarning
+
+
+
+class _ScaledTRFLSQFitter(TRFLSQFitter):
+    """Astropy TRFLSQFitter with SciPy's x_scale exposed.
+
+    Astropy retains responsibility for model validation, parameter
+    mapping, fixed and tied constraints, bounds, objective evaluation,
+    model reconstruction, and covariance calculation.
+
+    The only optimizer change is forwarding x_scale to Astropy's
+    underlying scipy.optimize.least_squares call.
+    """
+
+    def __init__(self, calc_uncertainties=False, x_scale=None):
+        super().__init__(calc_uncertainties=calc_uncertainties)
+        self._x_scale = x_scale
+
+    def _run_fitter(
+        self,
+        model,
+        farg,
+        fkwarg,
+        maxiter,
+        acc,
+        epsilon,
+        estimate_jacobian):
+        from scipy import optimize
+        from scipy.linalg import svd
+
+        if model.fit_deriv is None or estimate_jacobian:
+            dfunc = "2-point"
+        else:
+            def _dfunc(params, model, weights, *args, **context):
+                if model.col_fit_deriv:
+                    return np.transpose(
+                        self._wrap_deriv(
+                            params,
+                            model,
+                            weights,
+                            *args,
+                            fit_param_indices=None))
+
+                return self._wrap_deriv(
+                    params,
+                    model,
+                    weights,
+                    *args,
+                    fit_param_indices=None)
+
+            dfunc = _dfunc
+
+        init_values, _, bounds = model_to_fit_params(model)
+
+        if self._use_min_max_bounds:
+            bounds = (-np.inf, np.inf)
+
+        self.fit_info = optimize.least_squares(
+            self.objective_function,
+            init_values,
+            args=farg,
+            kwargs=fkwarg,
+            jac=dfunc,
+            max_nfev=maxiter,
+            diff_step=np.sqrt(epsilon),
+            xtol=acc,
+            method=self._method,
+            bounds=bounds,
+            x_scale=self._x_scale)
+
+        _, singular_values, vt = svd(self.fit_info.jac, full_matrices=False)
+
+        threshold = (np.finfo(float).eps
+            * max(self.fit_info.jac.shape)
+            * singular_values[0])
+
+        singular_values = singular_values[
+            singular_values > threshold]
+        vt = vt[: singular_values.size]
+        cov_x = np.dot(vt.T / singular_values**2, vt)
+
+        fitter_to_model_params(
+            model,
+            self.fit_info.x,
+            False)
+
+        if not self.fit_info.success:
+            warnings.warn("The fit may be unsuccessful; check:\n"
+                f"{self.fit_info.message}",
+                AstropyUserWarning)
+
+        return init_values, self.fit_info.x, cov_x
+
 
 
 class APFitter(Fitter):
@@ -159,20 +257,23 @@ class APFitter(Fitter):
         ap_class = ModifiedBlackBody1D
         self._add_component(ap_class, **kwargs)
 
-    def add_feature_line(self, name, power, wavelength, fwhm):
+    def add_feature_line(self, name, power, wavelength, fwhm, sigma_v, delta_v):
         """Register a PowerGaussian1D
 
         Analogous. Uses an implementation of the Gaussian profile, that
         directly fits the power based on the internal PAHFIT units.
+
+        ``fwhm`` is still converted to ``stddev`` using the existing
+        ``fwhm / 2.355`` calculation. ``sigma_v`` is passed separately
+        in km/s and is combined with ``stddev`` inside PowerGaussian1D.
 
         """
         self.feature_types[name] = "line"
 
         kwargs = self._astropy_model_kwargs(
             name,
-            ["power", "mean", "stddev"],
-            [power, wavelength, fwhm / 2.355],
-        )
+            ["power", "mean", "stddev", "sigma_v", "delta_v"],
+            [power, wavelength, fwhm / 2.355, sigma_v, delta_v])
         self._add_component(PowerGaussian1D, **kwargs)
 
     def add_feature_dust_feature(self, name, power, wavelength, fwhm):
@@ -230,256 +331,107 @@ class APFitter(Fitter):
         """
         return self.model(lam)
 
-
-    def _free_parameter_state(self):
-        free_param_names = []
-        x0 = []
-        lower_bounds = []
-        upper_bounds = []
-
-        fixed = getattr(self.model, "fixed", {}) 
-        tied = getattr(self.model, "tied", {}) 
-        bounds = getattr(self.model, "bounds", {}) 
-
-        for pname in self.model.param_names:
-            if fixed.get(pname, False):      
-               continue
-            if tied.get(pname, False):
-               continue
-
-            lo_bound, hi_bound = bounds.get(pname, (None, None)) 
-
-            if lo_bound is None or np.ma.is_masked(lo_bound):
-                lo_bound = -np.inf
-            else:
-                lo_bound = float(lo_bound)
-
-            if hi_bound is None or np.ma.is_masked(hi_bound):
-                hi_bound = np.inf
-            else:
-                hi_bound = float(hi_bound)
-
-            if np.isfinite(lo_bound) and np.isfinite(hi_bound) and lo_bound == hi_bound:
-                getattr(self.model, pname).value = lo_bound
-                continue
-
-            value = np.asarray(getattr(self.model, pname).value, dtype=float).item()
-
-            if np.isfinite(lo_bound) and value <= lo_bound:
-                step = 1e-12 * max(1.0, abs(lo_bound))
-                value = lo_bound + step
-                if np.isfinite(hi_bound) and value >= hi_bound:
-                   value = 0.5 * (lo_bound + hi_bound)
-	
-            if np.isfinite(hi_bound) and value >= hi_bound:
-                step = 1e-12 * max(1.0, abs(hi_bound))
-                value = hi_bound - step
-                if np.isfinite(lo_bound) and value <= lo_bound:
-                   value = 0.5 * (lo_bound +hi_bound)
-
-            free_param_names.append(pname)
-            x0.append(value)
-            lower_bounds.append(lo_bound)
-            upper_bounds.append(hi_bound)
-
-        return (free_param_names, np.asarray(x0, dtype=float),
-            (np.asarray(lower_bounds, dtype=float),
-             np.asarray(upper_bounds, dtype=float)))
-
-    def _set_free_parameters(self, free_param_names, values):
-        for pname, value in zip(free_param_names, values):
-            getattr(self.model, pname).value = value
-
-
     def fit_methods_available(self):
         return self.methods
 
-    def fit(self, lam, flux, unc, maxiter=10000, method=None, x_scale="jac", acc=1e-7, epsilon=1e-7):
-        """Fit the internal model using.
-
-        "lm" uses Astropy LevMarLSQFitter
-
-        "trf" calls scipy.optimize.least_squares directly because Astropy
-        TRFLSQFitter does not expose x_scale. Here, x_scale="jac" is 
-        used because the result parameters can differ by orders of magnitude.
-        For example, line power and dust-feature powers can have very different
-        numerical scales. Without scaling, TRF can take ineffective trust-region
-        steps and terminate before small-scale parameters move correctly.
-
-        The fitter class is unit agnostic, and deal with the numbers the
-        Model tells it to deal with. Internal renormalizations could be
-        good to consider, as long as any values are converted back to
-        the original system before returning them. In practice, the
-        input spectrum is expected to be in internal units, and orrected
-        for redshift (models operate in the rest frame).
-
-        After the fit, the results can be retrieved via get_result().
-
-        Retrieval of uncertainties and fit details is yet to be
-        implemented throught fit_info. The LM path uses Astropy fit_info.
-        The TRF path stores the scipy OptimizeResult fields needed for
-        diagnostics, chi2, redchi, and dof.
-
-        CAVEAT: flux unit (flux) is still ambiguous, since it can be
-        flux density or intensity, according to the options defined in
-        pahfit.units. After the fit, the return units of "power" in
-        get_results depend on the given spectrum (they will be flux unit
-        times wavelength unit).
+    def fit(
+        self,
+        lam,
+        flux,
+        unc,
+        maxiter=10000,
+        method=None,
+        x_scale=None,
+        acc=1e-7,
+        epsilon=1e-7):
+        """Fit using Astropy LM or Astropy TRF.
 
         Parameters
         ----------
         lam : array
-            Rest frame wavelengths in micron
+            Rest-frame wavelength in micron.
 
         flux : array
-            Rest frame flux in internal units.
+            Rest-frame flux in PAHFIT internal units.
 
         unc : array
-            Uncertainty on rest frame flux. Same units as flux.
+            Flux uncertainty.
 
         maxiter : int
-            Maximum number of fitting iterations or function evaluations.
+            Maximum number of function evaluations.
 
-        method : str
-            Fit method. Available options: "lm" uses Astropy
-            LevMarLSQFitter. "trf" uses scipy.optimize.least_squares
-            TRFLSQFitter.
+        method : {"lm", "trf"} or None
+            Fitting method. None selects LM.
 
-        x_scale : str (or array)
-            Scaling passed to scipy.optimize.least_squares for the TRF
-            path. The defualt is "jac", which updates parameter scales
-            using the inverse norms of the Jacobian columns.
+        x_scale : None, "jac", scalar, or array
+            Parameter scaling passed to the TRF solver. It is not used
+            by the LM path.
 
         acc : float
-            Relative error desired in the approximate solution. This is
-            passed as acc to the Astropy LM fitter and as xtol to scipy
-            least_squares for TRF.
+            Relative fitting accuracy.
 
         epsilon : float
-            Step_size control for numerical Jacobian estimation. The TRF
-            path follows Astropy's convention and passes diff_step=npsqrt(epsilon)
-            to scipy.optimize.least_squares.
+            Numerical derivative step control.
         """
-        w = 1 / unc
+        w = 1.0 / unc
         mask = np.isfinite(lam) & np.isfinite(flux) & np.isfinite(w)
 
-        self.fit_info = {}
-
-        # select method based on given string or pick default if None
         method_str = self.methods[0] if method is None else method
+
         if method_str not in self.methods:
             raise PAHFITModelError(
-                f"Selected method {method} not available for APFitter backend."
+                f"Selected method {method} not available "
+                "for APFitter backend."
             )
 
         if method_str == "lm":
-            print("Running lmlsq fit")
+            print("Running Astropy LevMarLSQFitter")
 
             fit = LevMarLSQFitter(calc_uncertainties=True)
-            temp_result = fit(
-                self.model,
-                lam[mask],
-                flux[mask],
-                weights=w[mask],
-                maxiter=maxiter,
-                epsilon=epsilon,
-                acc=acc)
 
-            self.model = temp_result
-            self.fit_info = fit.fit_info
-            self.message = fit.fit_info["message"]
+        else:
+            print(
+                "Running Astropy TRFLSQFitter "
+                f"with x_scale={x_scale}")
 
-            model_y = self.model(lam[mask])
-            resid = (flux[mask] - model_y) * w[mask]
-            chi2 = np.nansum(resid**2)
+            fit = _ScaledTRFLSQFitter(
+                calc_uncertainties=True,
+                x_scale=x_scale)
 
-            free_param_names, _, _ = self._free_parameter_state()
-            dof = max(np.count_nonzero(mask) - len(free_param_names), 1)
-            redchi = chi2 / dof
+        temp_result = fit(
+            self.model,
+            lam[mask],
+            flux[mask],
+            weights=w[mask],
+            maxiter=maxiter,
+            epsilon=epsilon,
+            acc=acc)
 
-            self.fit_info["chi2"] = chi2
-            self.fit_info["redchi"] = redchi
-            self.fit_info["dof"] = dof
-            self.fit_info["method"] = "lm"
-            self.fit_info["x_scale"] = None
-            return
+        self.model = temp_result
+        self.fit_info = fit.fit_info
+        self.message = fit.fit_info["message"]
 
-        if method_str == "trf":
-            print(f"Running trflsq fit with scipy least_squares x_scale={x_scale}")
+        model_y = self.model(lam[mask])
+        resid = (flux[mask] - model_y) * w[mask]
+        chi2 = np.nansum(resid**2)
 
-            fit_lam = lam[mask]
-            fit_flux = flux[mask]
-            fit_w = w[mask]
+        free_values, fit_param_indices, _ = model_to_fit_params(
+            self.model)
 
-            free_param_names, x0, bounds = self._free_parameter_state()
+        free_param_names = [
+            self.model.param_names[index]
+            for index in fit_param_indices]
 
-            if len(free_param_names) == 0:
-                model_y = self.model(fit_lam)
-                resid = (fit_flux - model_y) * fit_w
-                chi2 = np.nansum(resid**2)
-                dof = max(np.count_nonzero(mask), 1)
+        dof = max(
+            np.count_nonzero(mask) - free_values.size,
+            1)
 
-                self.message = "No free parameters."
-                self.fit_info = {
-                    "message": self.message,
-                    "success": True,
-                    "status": 0,
-                    "method": "trf",
-                    "x_scale": x_scale,
-                    "nfev": 0,
-                    "njev": 0,
-                    "cost": 0.5 * chi2,
-                    "optimality": np.nan,
-                    "active_mask": np.asarray([], dtype=int),
-                    "param_names": free_param_names,
-                    "x": x0,
-                    "chi2": chi2,
-                    "redchi": chi2 / dof,
-                    "dof": dof}
-                return
-
-            def residuals(values):
-                self._set_free_parameters(free_param_names, values)
-                return (fit_flux - self.model(fit_lam)) * fit_w
-
-            result = least_squares(
-                residuals,
-                x0,
-                bounds=bounds,
-                method="trf",
-                jac="2-point",
-                x_scale=x_scale,
-                max_nfev=maxiter,
-                diff_step=np.sqrt(epsilon),
-                xtol=acc)
-
-            self._set_free_parameters(free_param_names, result.x)
-
-            resid = (fit_flux - self.model(fit_lam)) * fit_w
-            chi2 = np.nansum(resid**2)
-            dof = max(np.count_nonzero(mask) - len(free_param_names), 1)
-            redchi = chi2 / dof
-
-            self.message = result.message
-            self.fit_info = {
-                "message": result.message,
-                "success": result.success,
-                "status": result.status,
-                "method": "trf",
-                "x_scale": x_scale,
-                "nfev": result.nfev,
-                "njev": result.njev,
-                "cost": result.cost,
-                "optimality": result.optimality,
-                "active_mask": result.active_mask,
-                "param_names": free_param_names,
-                "x": result.x,
-                "fun": result.fun,
-                "jac": result.jac,
-                "chi2": chi2,
-                "redchi": redchi,
-                "dof": dof}
-            return
+        self.fit_info["param_names"] = free_param_names
+        self.fit_info["chi2"] = chi2
+        self.fit_info["redchi"] = chi2 / dof
+        self.fit_info["dof"] = dof
+        self.fit_info["method"] = method_str
+        self.fit_info["x_scale"] = (x_scale if method_str == "trf" else None)
 
     def get_result(self, component_name):
         """Retrieve results from astropy model component.
@@ -502,7 +454,7 @@ class APFitter(Fitter):
 
         e.g., for a feature with amplitude, stddev, and mean parameters:
         {'power': converted from amplitude, 'fwhm': converted from
-        stddev, 'mean': wavelength}
+        stddev, 'mean': wavelength, 'sigma_v': velocity dispersion}
 
         """
         if self.model is None:
@@ -524,7 +476,9 @@ class APFitter(Fitter):
             return {
                 "power": component.power.value,
                 "wavelength": component.mean.value,
-                "fwhm": component.stddev.value * 2.355}
+                "fwhm": component.stddev.value * 2.355,
+                "sigma_v": component.sigma_v.value,
+                "delta_v": component.delta_v.value}
         elif c_type == "dust_feature":
             return {
                 "power": component.power.value,
@@ -600,7 +554,6 @@ class APFitter(Fitter):
             kwargs[param_name] = value
             kwargs["fixed"][param_name] = is_fixed
             kwargs["bounds"][param_name] = [
-                None if np.isinf(x) else x for x in (lo_bound, up_bound)
-            ]
+                None if np.isinf(x) else x for x in (lo_bound, up_bound)]
 
         return kwargs

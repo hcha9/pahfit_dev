@@ -263,11 +263,37 @@ class PowerGaussian1D(Fittable1DModel):
     So the constant factor we can set is
     (unit(power) * unit(wavelength)**2 / (c * unit(wavelength) * sqrt(2 pi))).to(intensity)
 
+    For emission lines, ``stddev`` remains the Gaussian wavelength
+    dispersion obtained from the existing ``fwhm / 2.355`` conversion.
+    The intrinsic one-sigma velocity dispersion ``sigma_v`` contributes
+
+        sigma_lambda_v = mean * sigma_v / c
+
+    and the Gaussian is evaluated using
+
+        total_stddev = sqrt(stddev**2 + sigma_lambda_v**2).
+
+    ``sigma_v`` is represented numerically in km/s, while ``mean`` and
+    ``stddev`` use the internal wavelength unit.
+
+    ``delta_v`` is a residual line-of-sight velocity shift relative to
+    the systemic redshift already removed from the fitting wavelength
+    grid. Positive values move the line to longer wavelengths and
+    negative values move it to shorter wavelengths. The shifted line
+    center is
+
+        shifted_mean = mean * (1 + delta_v / c).
+
+    ``delta_v`` is represented numerically in km/s.
+
     """
 
     power = Parameter(min=0.0)
     mean = Parameter()
     stddev = Parameter(default=1, min=0.0)
+    sigma_v = Parameter(default=0.0, min=0.0)
+    delta_v = Parameter(default=0.0)
+    c_kms = constants.c.to("km/s").value
 
     intensity_amplitude_factor = (
         (
@@ -279,12 +305,14 @@ class PowerGaussian1D(Fittable1DModel):
         .value
     )
 
-    def evaluate(self, x, power, mean, stddev):
+    def evaluate(self, x, power, mean, stddev, sigma_v, delta_v):
         """
-        Evaluate F_nu(lambda) given the power.
+        Evaluate F_nu(lambda) given the power and both line-width terms.
 
-        See class description for equations and unit notes."""
-
-        # amplitude in intensity units
-        Anu = power * mean**2 / stddev * self.intensity_amplitude_factor
-        return Anu * np.exp(-0.5 * np.square((x - mean) / stddev))
+        See class description for equations and unit notes.
+        """
+        shifted_mean = mean * (1.0 + delta_v / self.c_kms)
+        sigma_lambda_v = shifted_mean * sigma_v / self.c_kms
+        total_stddev = np.hypot(stddev, sigma_lambda_v)
+        Anu = power * mean**2 / total_stddev * self.intensity_amplitude_factor
+        return Anu * np.exp(-0.5 * np.square((x - shifted_mean) / total_stddev))

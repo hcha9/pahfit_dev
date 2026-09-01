@@ -33,7 +33,13 @@ dust_cont: # Modified Blackbodies
 ##############################
 H2_lines:
     kind: line
+    sigma_v: 30.0
+    delta_v: 0.0
+    bounds: 
+            sigma_v: [0.0, 300.0] 
+            delta_v: [-90.0, 90.0]
     wavelength:
+        H2_S(8):    5.05
         H2_S(7):    5.5115
         H2_S(6):    6.1088
         H2_S(5):    6.9091
@@ -41,25 +47,34 @@ H2_lines:
         H2_S(3):    9.6649
         H2_S(2):   12.2785
         H2_S(1):   17.0346
-        H2_S(0):   28.2207
+#        H2_S(0):   28.2207
+        HI_(8-6):   7.5
+        HI_Pfa:   7.46
+        HI_Hua:   12.37
 
 ################################
 # Ionic Line Emission Features #
 ################################
 ionic_lines:
     kind: line
+    sigma_v: 30.0
+    delta_v: 0.0
+    bounds: 
+            sigma_v: [0.0, 1000.0]
+            delta_v: [-100.0, 100.0]
     wavelength:
+        '[FeII]_5':   5.34
         '[ArII]':     6.985274
         '[ArIII]':    8.99138
         '[SIV]':     10.5105
         '[NeII]':    12.813
         '[NeIII]':   15.555
+        '[PIII]': 17.88
+        '[FeII]_17': 17.94
         '[SIII]_18': 18.713
+        '[FeIII]': 22.925
         '[OIV]':     25.91
         '[FeII]_26': 25.989
-        '[SIII]_33': 33.480
-        '[SiII]':    34.8152
-        '[FeII]_35': 35.349
 
 #################
 # Dust Features #
@@ -174,15 +189,10 @@ PAH_17_cmp:
             fwhm: 0.28592
 
 # This dust feature, in the PAHFIT classic model, is attributed to C60 and omitted.
-#PAH_18.92:
-#    kind: dust_feature
-#    wavelength: 18.92
-#    fwhm: 0.35948
-
-PAH_33.1:
+PAH_18.92:
     kind: dust_feature
-    wavelength: 33.1
-    fwhm: 1.655
+    wavelength: 18.92
+    fwhm: 0.35948
 
 ##########################
 # Attenuation Model      #
@@ -191,3 +201,6 @@ silicate:
     kind: attenuation
     model: S07_attenuation
     geometry: mixed
+    tau:
+        value: 25.0
+        bounds: [0.0, 100.0]
