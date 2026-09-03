@@ -91,10 +91,10 @@ class Fitter(ABC):
         pass
 
     @abstractmethod
-    def add_feature_line(self, name, power, wavelength, fwhm):
+    def add_feature_line(self, name, power, wavelength, fwhm, sigma_v, delta_v):
         """Register an emission line feature.
 
-        Typically a Gaussian profile.
+        Typically a Gaussian profile. 
 
         """
         pass
@@ -103,7 +103,10 @@ class Fitter(ABC):
     def add_feature_dust_feature(self, name, power, wavelength, fwhm):
         """Register a dust feature.
 
-        Typically a Drude profile.
+        Typically a Drude profile.  ``fwhm`` remains the existing wavelength
+        FWHM. ``sigma_v`` is the additional intrinsic one-sigma velocity
+        dispersion in km/s and is scalar when fixed or a three-element
+        value/bounds array when fitted.
 
         """
         pass
@@ -195,7 +198,7 @@ class Fitter(ABC):
         function. Values are in the same format as Features, and can
         therefore be directly filled in.
 
-        e.g. {'name': 'line0', 'power': value, 'fwhm': value, 'wavelength': value}
+        e.g. {'name': 'line0', 'power': value, 'fwhm': value, 'wavelength': value, 'sigma_v': value}
 
         """
         pass

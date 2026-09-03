@@ -33,7 +33,7 @@ import pahfit.units
 # Feature kinds and associated parameters
 KIND_PARAMS = {'starlight': {'temperature', 'tau'},
                'dust_continuum': {'temperature', 'tau'},
-               'line': {'wavelength', 'power'},  # 'fwhm', Instrument Pack detail!
+               'line': {'wavelength', 'power', 'sigma_v', 'delta_v'},  # 'fwhm', Instrument Pack detail!
                'dust_feature': {'wavelength', 'fwhm', 'power'},
                'attenuation': {'model', 'tau', 'geometry'},
                'absorption': {'wavelength', 'fwhm', 'tau', 'geometry'}}
@@ -45,7 +45,9 @@ KIND_PARAMS = {'starlight': {'temperature', 'tau'},
 PARAM_UNITS = {'temperature': pahfit.units.temperature,
                'wavelength': pahfit.units.wavelength,
                'fwhm': pahfit.units.wavelength,
-               'power': pahfit.units.intensity_power}
+               'power': pahfit.units.intensity_power,
+               'sigma_v': pahfit.units.velocity,
+               'delta_v': pahfit.units.velocity}
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -79,10 +81,11 @@ class Features(Table):
     _param_attrs = {'value', 'bounds'}  # Each parameter can have these attributes
     _no_bounds = {'name', 'group', 'kind', 'geometry', 'model'}  # str attributes (no bounds)
     _always_masked = {'tau', 'power', 'temperature',  # always mask these columns
-                      'wavelength', 'fwhm', 'geometry', 'model'}
+                      'wavelength', 'fwhm', 'sigma_v', 'delta_v', 'geometry', 'model'}
     _bounds_dtype = np.dtype([("val", float), ("min", float),  # bounded param type
                               ("max", float), ("frozen", bool)])
-    _param_defaults = dict(geometry='mixed')
+    _param_defaults = dict(geometry='mixed', sigma_v=(0.0, np.nan, np.nan, False),
+                           delta_v=(0.0, np.nan, np.nan, False))
 
     @classmethod
     def read(cls, file, *args, **kwargs):
@@ -184,10 +187,9 @@ class Features(Table):
                     for k, v in elem.items():
                         if k in cls._group_attrs:
                             continue
-                        if not isinstance(v, (tuple, list, dict)):
-                            raise PAHFITFeatureError(f"All non-group parameters in {name} "
-                                                     f"must be lists or dicts:\n\t{file}")
-                        llen.append(len(v))
+                        is_group_sequence = isinstance(v, (tuple, list)) or (isinstance(v, dict) and cls._param_attrs.isdisjoint(v.keys()))
+                        if is_group_sequence:
+                            llen.append(len(v))
 
                     if not all(x == llen[0] for x in llen):
                         raise PAHFITFeatureError(f"All parameter lists in group {name} "
@@ -195,14 +197,15 @@ class Features(Table):
                     ngroup = llen[0]
                     feat_names = None
                     for k, v in elem.items():
-                        if isinstance(elem[k], dict):
+                        if isinstance(elem[k], dict) and cls._param_attrs.isdisjoint(elem[k].keys()):
                             if not feat_names:  # First names win
                                 feat_names = list(elem[k].keys())
                             elem[k] = list(elem[k].values())  # turn back into a value list
                     if not feat_names:  # no names: construct one for each group feature
                         feat_names = [f"{name}{x:02}" for x in range(ngroup)]
                     for i in range(ngroup):  # Iterate over list(s) adding feature
-                        v = {k: elem[k][i] for k in valid_params if k in elem}
+                        v = {k: elem[k][i] if isinstance(elem[k], 
+                             (tuple, list)) else elem[k] for k in valid_params if k in elem}
                         cls._add_feature(kind, feat_tables, feat_names[i],
                                          group=name, bounds=bounds, **v)
                 else:
@@ -273,11 +276,10 @@ class Features(Table):
             rows = []
             for (name, params) in features.items():
                 for missing in kp - params.keys():
-                    if missing in cls._no_bounds:
-                        if missing in cls._param_defaults:
-                            params[missing] = cls._param_defaults[missing]
-                        else:
-                            params[missing] = 0.0
+                    if missing in cls._param_defaults:
+                        params[missing] = cls._param_defaults[missing]
+                    elif missing in cls._no_bounds:
+                        params[missing] = 0.0
                     else:
                         params[missing] = (*value_bounds(0.0, bounds=(0.0, None)), False)
                 rows.append(dict(name=name, **params))

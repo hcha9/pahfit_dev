@@ -941,9 +941,11 @@ class Model:
                     # the value as is specified in the Features table
                     fwhm = cleaned(row["fwhm"])
 
-                self.fitter.add_feature_line(
-                    name, cleaned(row["power"]), cleaned(row["wavelength"]), fwhm
-                )
+                self.fitter.add_feature_line(name, 
+                                             cleaned(row["power"]), 
+                                             cleaned(row["wavelength"]), fwhm,
+                                             cleaned(row["sigma_v"]), 
+                                             cleaned(row["delta_v"]))
 
             elif kind == "dust_feature":
                 self.fitter.add_feature_dust_feature(
